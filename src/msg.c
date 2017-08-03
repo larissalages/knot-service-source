@@ -1228,6 +1228,116 @@ static int8_t msg_schema(int sock, int proto_sock,
 	return KNOT_SUCCESS;
 }
 
+/*This function receives the config from Thing*/
+static int8_t msg_config_thing(int sock, int proto_sock,
+				const struct proto_ops *proto_ops,
+				const knot_msg_config *kmcfg, gboolean eof)
+{
+	const knot_msg_config *config = kmcfg;
+	knot_msg_config *kconfig;
+	struct json_object *jobj, *ajobj, *configjobj;
+	struct trust *trust;
+	GSList *list;
+	json_raw_t json;
+	const char *jobjstr;
+	int err;
+	gboolean found = FALSE;
+	int len_lower,len_upper;
+	double dval_lower, dval_upper;
+	char str[12];
+
+	trust = g_hash_table_lookup(trust_list, GINT_TO_POINTER(sock));
+	if (!trust) {
+		hal_log_info("Permission denied!");
+		return KNOT_CREDENTIAL_UNAUTHORIZED;
+	}
+
+	/* Getting 'config' from the device properties:
+	 *
+	 * {"uuid": ...
+	 *		"config" : [
+	 *			{"sensor_id": v, "event_flags": w,
+	 *				"time_sec": x "lower_limit": y,
+	 *						"upper_limit": z}]
+	 * }
+	 */
+
+	/*
+	 * Checks whether the config was received before and if not, adds
+	 * to a temporary list until receiving complete config.
+	 */
+	kconfig = g_memdup(config, sizeof(*config));
+	for (list = trust->config_tmp; list ; list = g_slist_next(list)) {
+		config = list->data;
+		if (kconfig->sensor_id == config->sensor_id)
+			found = TRUE;
+	}
+	if (!found)
+		trust->config_tmp = g_slist_append(trust->config_tmp, kconfig);
+
+	if (!eof)
+		return KNOT_SUCCESS;
+
+	/* config is an array of entries */
+	ajobj = json_object_new_array();
+	configjobj = json_object_new_object();
+
+	/* Transform the int and decimal values of lower_limit and upper_limit
+	 * in float values.
+	 */
+	len_lower = sprintf(str, "%d", config->values.lower_limit.val_f.value_dec);
+	dval_lower = (config->values.lower_limit.val_f.value_int +
+		(config->values.lower_limit.val_f.value_dec / pow(10, len_lower)));
+
+	len_upper = sprintf(str, "%d", config->values.upper_limit.val_f.value_dec);
+	dval_upper = (config->values.lower_limit.val_f.value_int +
+		(config->values.lower_limit.val_f.value_dec / pow(10, len_upper)));
+
+
+	/* Creating an array if the sensor supports multiple data types */
+	for (list = trust->config_tmp; list; list = g_slist_next(list)) {
+		config = list->data;
+		jobj = json_object_new_object();
+		json_object_object_add(jobj, "sensor_id",
+				json_object_new_int(config->sensor_id));
+		json_object_object_add(jobj, "event_flags",
+				json_object_new_int(config->values.event_flags));
+		json_object_object_add(jobj, "time_sec",
+				json_object_new_int(config->values.time_sec));
+		json_object_object_add(jobj, "lower_limit",
+				json_object_new_double(dval_lower));
+		json_object_object_add(jobj, "upper_limit",
+				json_object_new_double(dval_upper));
+
+		json_object_array_add(ajobj, jobj);
+	}
+
+	json_object_object_add(configjobj, "config", ajobj);
+	jobjstr = json_object_to_json_string(configjobj);
+
+	memset(&json, 0, sizeof(json));
+	err = proto_ops->config(proto_sock, trust->uuid, trust->token,
+							jobjstr, &json);
+	if (json.data)
+		free(json.data);
+
+	json_object_put(configjobj);
+
+	if (err < 0) {
+		g_slist_free_full(trust->config_tmp, g_free);
+		trust->config_tmp = NULL;
+		hal_log_error("manager config(): %s(%d)", strerror(-err), -err);
+		return KNOT_CLOUD_FAILURE;
+	}
+
+	/* If POST succeed: free old schema and use the new one */
+	g_slist_free_full(trust->config, g_free);
+	trust->config = trust->config_tmp;
+	trust->config_tmp = NULL;
+
+	return KNOT_SUCCESS;
+}
+
 /*
  * Updates de 'devices' db, removing the sensor_id that just sent the data
  */
@@ -1710,6 +1820,15 @@ ssize_t msg_process(int sock, int proto_sock,
 		result = msg_setdata_resp(sock, proto_sock, proto_ops,
 								&kreq->data);
 		return 0;
+	case KNOT_MSG_CONFIG:
+	case KNOT_MSG_CONFIG_END:
+		eof = kreq->hdr.type == KNOT_MSG_CONFIG_END ? TRUE : FALSE;
+		result = msg_config_thing(sock, proto_sock, proto_ops,
+							&kreq->config,eof);
+		rtype = KNOT_MSG_CONFIG_RESP;
+		if (eof)
+			rtype = KNOT_MSG_CONFIG_END_RESP;
+		break;
 	default:
 		/* TODO: reply unknown command */
 		break;

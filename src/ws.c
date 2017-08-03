@@ -961,5 +961,6 @@ struct proto_ops proto_ws = {
 	.data = ws_data,
 	.fetch = ws_device,
 	.async = proto_register_watch,
-	.setdata = ws_update
+	.setdata = ws_update,
+	.config = ws_update
 };

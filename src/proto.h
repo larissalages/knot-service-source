@@ -57,6 +57,8 @@ struct proto_ops {
 							json_raw_t *json);
 	int (*setdata) (int sock, const char *uuid, const char *token,
 					const char *jreq, json_raw_t *json);
+	int (*config) (int sock, const char *uuid, const char *token,
+					const char *jreq, json_raw_t *json);
 	/*
 	 * Watch that polls or monitors the cloud to check if "CONFIG" changed
 	 * or "SET DATA" or "GET DATA".
